@@ -86,7 +86,17 @@ export function ResourcePage({ endpoint, title, description, actionLabel }: Reso
                 className="resource-card"
                 key={item.id}
               >
-                {endpoint === "/api/projects" ? <Link href={`/projects/${item.id}`}>{content}</Link> : content}
+                {endpoint === "/api/projects" ? (
+                  <Link href={`/projects/${item.id}`}>{content}</Link>
+                ) : endpoint === "/api/templates" ? (
+                  <Link
+                    href={`/create?vibe=${encodeURIComponent(String((item.prompt as { avatar_vibe?: string } | undefined)?.avatar_vibe || ""))}&topic=${encodeURIComponent(String(item.description || ""))}`}
+                  >
+                    {content}
+                  </Link>
+                ) : (
+                  content
+                )}
               </motion.article>
             );
           })}
@@ -153,7 +163,16 @@ export function ProjectDetail({ id }: { id: string }) {
   return (
     <section className="project-detail">
       <Link className="back-link" href="/projects">← All projects</Link>
-      <div className="page-title-row"><div><span className="eyebrow">Project</span><h2>{displayName(project)}</h2><p>{project.status || "Project details"}</p></div></div>
+      <div className="page-title-row">
+        <div>
+          <span className="eyebrow">Project</span>
+          <h2>{displayName(project)}</h2>
+          <p>{project.status || "Project details"}</p>
+        </div>
+        <Link className="primary-button" href={`/create?project_id=${encodeURIComponent(project.id)}`}>
+          Open in studio
+        </Link>
+      </div>
       {project.final_video_url || project.video_url ? <video className="detail-video" src={String(project.final_video_url || project.video_url)} controls playsInline /> : <div className="empty-state"><Clapperboard /><strong>No rendered video yet</strong></div>}
       <div className="detail-grid">
         <div className="detail-card"><span>Topic</span><p>{project.target_prompt || project.topic || "Not provided"}</p></div>

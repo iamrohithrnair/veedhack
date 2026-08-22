@@ -19,6 +19,7 @@ from tavily import TavilyClient
 from app import db
 from app.artifacts import copy_file, write_json, write_text
 from app.config import get_settings
+from app.jobs import spawn
 from app.models import ScriptRequest
 from app.pioneer.finetune import PioneerClient
 from app.pioneer.normalize import normalize_inference
@@ -63,12 +64,57 @@ async def _ensure_project(body: ScriptRequest) -> dict[str, Any]:
     )
 
 
-async def _stream_script(body: ScriptRequest, project_id: str) -> AsyncIterator[dict[str, str]]:
+PERSONA_TONES = {
+    "theatrical": (
+        "TONE & PERSONA: Dramatic, theatrical, and gloriously unhinged. "
+        "Open with a loud hook like 'Hark!' or 'Fools!' and frame the pain point as a grand existential tragedy."
+    ),
+    "funny": (
+        "TONE & PERSONA: Hilarious, satirical, and punchy. Use comedic timing, self-aware wit, and funny analogies. "
+        "Make the audience laugh out loud while hitting the sharp core truth."
+    ),
+    "serious": (
+        "TONE & PERSONA: Serious, authoritative, and direct like an executive intelligence briefing. "
+        "Use sober gravitas, urgency, and crisp business conviction."
+    ),
+    "quirky": (
+        "TONE & PERSONA: Delightfully quirky, eccentric, and enthusiastically nerdy. "
+        "Use vivid, weird metaphors and infectious, wide-eyed intellectual curiosity."
+    ),
+    "cheeky": (
+        "TONE & PERSONA: Cheeky, playfully sarcastic, and irreverent with a knowing smirk. "
+        "Boldly poke fun at industry BS and sacred cows with playful swagger."
+    ),
+    "deep": (
+        "TONE & PERSONA: Deep, philosophical, and poetic like a late-night 3am epiphany. "
+        "Speak with profound existential insight, striking imagery, and reflective weight."
+    ),
+    "hype": (
+        "TONE & PERSONA: Electrifying, motivational, and high-energy hype creator. "
+        "Deliver relentless momentum, magnetic enthusiasm, and contagious excitement."
+    ),
+    "empathetic": (
+        "TONE & PERSONA: Warm, heartfelt, compassionate, and deeply human. "
+        "Speak like a trusted mentor or empathetic confidant in a cozy coffee chat."
+    ),
+}
+
+
+async def _execute_script_pipeline(
+    body: ScriptRequest,
+    project_id: str,
+    queue: asyncio.Queue[dict[str, str] | None] | None = None,
+) -> None:
     settings = get_settings()
     audio_path: Path | None = None
+
+    async def send_event(event: dict[str, str]) -> None:
+        if queue is not None:
+            await queue.put(event)
+
     try:
         await db.update_project(project_id, {"status": "researching"})
-        yield await emit(project_id, make_event("tavily", "info", "Extracting industry context..."))
+        await send_event(await emit(project_id, make_event("tavily", "info", "Extracting industry context...")))
         tavily_key = settings.require("tavily_api_key")
         tavily = TavilyClient(api_key=tavily_key)
         research = await asyncio.to_thread(
@@ -81,77 +127,83 @@ async def _stream_script(body: ScriptRequest, project_id: str) -> AsyncIterator[
         )
         research_text = _research_text(research)
         await db.update_project(project_id, {"research": research, "status": "extracting"})
-        yield await emit(
-            project_id,
-            make_event("tavily", "success", "Industry context extracted", {"result_count": len(research["results"])}),
+        await send_event(
+            await emit(
+                project_id,
+                make_event("tavily", "success", "Industry context extracted", {"result_count": len(research["results"])}),
+            )
         )
 
         pioneer_key = settings.require("pioneer_api_key")
         model_id = settings.pioneer_model_id or "fastino/gliner2-base-v1"
-        yield await emit(
-            project_id,
-            make_event("gliner", "info", "Slicing data with tuned GLiNER2...", {"model_id": model_id}),
+        inference_text = (
+            f"Target: {body.target_prompt}\n\n"
+            f"Research:\n{research_text[:1500]}"
+        )
+        inference_payload = {
+            "model_id": model_id,
+            "text": inference_text,
+            "schema": {
+                "entities": {
+                    "Core_Subject": "The central product, technology, or idea being discussed",
+                    "Pain_Point": "The problem, inefficiency, or negative status quo",
+                    "Action_Hook": "The next step, solution, or call to action",
+                },
+                "classifications": [
+                    {
+                        "task": "Emotional_Vibe",
+                        "labels": ["outrage", "excitement", "warning", "confidence"],
+                    }
+                ],
+            },
+            "threshold": 0.05,
+            "include_confidence": True,
+            "include_spans": True,
+            "store": False,
+        }
+        await send_event(
+            await emit(
+                project_id,
+                make_event("gliner", "info", "Slicing data with tuned GLiNER2...", {"model_id": model_id}),
+            )
         )
         async with PioneerClient(pioneer_key, settings.pioneer_base_url) as pioneer:
-            pioneer_result = await pioneer.inference(
-                {
-                    "model_id": model_id,
-                    "text": (
-                        f"Target: {body.target_prompt}\n\n"
-                        f"Research:\n{research_text[:900]}"
-                    ),
-                    "schema": {
-                        "entities": {
-                            "Core_Subject": "The central product, technology, or idea being discussed",
-                            "Pain_Point": "A concrete problem, costly workflow, or frustration",
-                            "Action_Hook": "A recommended next step, solution, or call to action",
-                        },
-                        "classifications": [
-                            {
-                                "task": "Emotional_Vibe",
-                                "labels": [
-                                    "outrage",
-                                    "excitement",
-                                    "warning",
-                                    "confidence",
-                                ],
-                            }
-                        ],
-                    },
-                    "threshold": 0.05,
-                    "include_confidence": True,
-                    "include_spans": True,
-                    "store": False,
-                }
-            )
+            pioneer_result = await pioneer.inference(inference_payload)
         extracted = normalize_inference(pioneer_result)
         write_json(project_id, "research.json", research)
         write_json(project_id, "pioneer-raw.json", pioneer_result)
         write_json(project_id, "extracted.json", extracted)
         await db.update_project(project_id, {"extracted": extracted, "status": "writing"})
-        yield await emit(
-            project_id,
-            make_event("gliner", "success", "Structured context extracted", {"entities": extracted, "model_id": model_id}),
+        await send_event(
+            await emit(
+                project_id,
+                make_event("gliner", "success", "Structured context extracted", {"entities": extracted, "model_id": model_id}),
+            )
         )
 
         openai_key = settings.require("openai_api_key")
         client = AsyncOpenAI(api_key=openai_key)
         vibe = body.avatar_vibe or extracted["Emotional_Vibe"]
+        tone_key = (body.tone or "theatrical").lower()
+        tone_instruction = PERSONA_TONES.get(tone_key, PERSONA_TONES["theatrical"])
+
         system_prompt = (
-            "You are a world-class, unhinged, theatrical Pitch Doctor. Transform factual "
-            "tech/corporate data into a dramatic, hilarious, 2-sentence video monologue for a "
-            "stylized avatar. RULES: 1. NO CORPORATE JARGON. 2. PATTERN INTERRUPT: Start with a "
-            'loud, dramatic hook ("Hark!", "Fools!"). 3. THE VILLAIN: Frame the Pain_Point as an '
-            "existential threat. 4. LENGTH: Exactly two punchy sentences, max 10 seconds spoken. "
-            "5. FORMAT: Return strictly the spoken text."
+            f"You are a world-class video scriptwriter and persona voice coach. {tone_instruction} "
+            "Transform factual context and market data into a high-impact, spoken video monologue for a stylized avatar.\n"
+            "RULES:\n"
+            "1. NO EMPTY CORPORATE JARGON.\n"
+            "2. PATTERN INTERRUPT: Start with an immediate, gripping opening hook matching the persona tone.\n"
+            "3. CORE SUBSTANCE: Naturally weave in the Core_Subject, Pain_Point, and Action_Hook from research.\n"
+            "4. LENGTH: Exactly two to three punchy spoken sentences (under 12 seconds spoken duration).\n"
+            "5. FORMAT: Return strictly the spoken monologue text with no emojis, stage directions, or markdown."
         )
         exact_prompt = (
-            f"Target: {body.target_prompt}\nAvatar vibe: {vibe}\n"
+            f"Target: {body.target_prompt}\nAvatar vibe: {vibe}\nTone persona: {tone_key}\n"
             f"Core subject: {extracted['Core_Subject']}\nPain point: {extracted['Pain_Point']}\n"
             f"Emotional vibe: {extracted['Emotional_Vibe']}\nAction hook: {extracted['Action_Hook']}\n"
             f"Research:\n{research_text}"
         )
-        yield await emit(project_id, make_event("openai", "info", "Writing unhinged script..."))
+        await send_event(await emit(project_id, make_event("openai", "info", f"Writing {tone_key} script...")))
         script_parts: list[str] = []
         stream = await client.responses.create(
             model=settings.openai_model,
@@ -164,28 +216,20 @@ async def _stream_script(body: ScriptRequest, project_id: str) -> AsyncIterator[
             if item.type == "response.output_text.delta":
                 delta = item.delta
                 script_parts.append(delta)
-                yield await emit(
-                    project_id,
-                    make_event("script_delta", "info", "Script token", {"delta": delta}),
+                await send_event(
+                    await emit(
+                        project_id,
+                        make_event("script_delta", "info", "Script token", {"delta": delta}),
+                    )
                 )
         script = "".join(script_parts).strip()
         if not script:
             raise RuntimeError("OpenAI returned an empty script")
-        sentence_endings = re.findall(r"""[.!?]+["'’”)\]]*(?=\s|$)""", script)
-        has_standalone_hook = re.match(r"^\s*(?:Hark|Fools)!\s+", script, re.IGNORECASE)
-        valid_sentence_count = len(sentence_endings) == 2 or (
-            bool(has_standalone_hook) and len(sentence_endings) == 3
-        )
-        if not valid_sentence_count:
-            raise RuntimeError(
-                "OpenAI did not honor the theatrical two-sentence contract "
-                f"({len(sentence_endings)} punctuation-delimited sentences found)"
-            )
         write_text(project_id, "script.txt", script)
         await db.update_project(project_id, {"script": script, "status": "voicing"})
-        yield await emit(project_id, make_event("openai", "success", "Script complete", {"script": script}))
+        await send_event(await emit(project_id, make_event("openai", "success", "Script complete", {"script": script})))
 
-        yield await emit(project_id, make_event("tts", "info", "Generating onyx voice track..."))
+        await send_event(await emit(project_id, make_event("tts", "info", "Generating onyx voice track...")))
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as audio_file:
             audio_path = Path(audio_file.name)
         async with client.audio.speech.with_streaming_response.create(
@@ -216,30 +260,46 @@ async def _stream_script(body: ScriptRequest, project_id: str) -> AsyncIterator[
             },
         )
         await db.update_project(project_id, {"audio_url": audio_url, "status": "script_ready"})
-        yield await emit(
-            project_id,
-            make_event("tts", "success", "Voice track uploaded", {"audio_url": audio_url}),
+        await send_event(
+            await emit(
+                project_id,
+                make_event("tts", "success", "Voice track uploaded", {"audio_url": audio_url}),
+            )
         )
-        yield await emit(
-            project_id,
-            make_event(
-                "done",
-                "success",
-                "Script pipeline complete",
-                {
-                    "project_id": project_id,
-                    "entities": extracted,
-                    "script": script,
-                    "audio_url": audio_url,
-                },
-            ),
+        await send_event(
+            await emit(
+                project_id,
+                make_event(
+                    "done",
+                    "success",
+                    "Script pipeline complete",
+                    {
+                        "project_id": project_id,
+                        "entities": extracted,
+                        "script": script,
+                        "audio_url": audio_url,
+                    },
+                ),
+            )
         )
     except Exception as error:
         await db.update_project(project_id, {"status": "failed"})
-        yield await emit_error(project_id, "error", error)
+        await send_event(await emit_error(project_id, "error", error))
     finally:
         if audio_path:
             audio_path.unlink(missing_ok=True)
+        if queue is not None:
+            await queue.put(None)
+
+
+async def _stream_script(body: ScriptRequest, project_id: str) -> AsyncIterator[dict[str, str]]:
+    queue: asyncio.Queue[dict[str, str] | None] = asyncio.Queue()
+    spawn(_execute_script_pipeline(body, project_id, queue))
+    while True:
+        event = await queue.get()
+        if event is None:
+            break
+        yield event
 
 
 @router.post("/generate-script")

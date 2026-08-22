@@ -16,6 +16,7 @@ export type Project = ApiRecord & {
   topic?: string;
   target_prompt?: string;
   avatar_vibe?: string;
+  tone?: string;
   script?: string;
   audio_url?: string;
   avatar_image_url?: string;
@@ -55,4 +56,5 @@ export type GenerateScriptInput = {
   project_id: string;
   topic: string;
   avatar_vibe: string;
+  tone?: string;
 };

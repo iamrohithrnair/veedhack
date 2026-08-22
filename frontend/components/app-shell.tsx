@@ -34,7 +34,15 @@ const nav = [
   { href: "/history", label: "History", icon: Clock3 },
 ];
 
-const ProjectNameContext = createContext("New Project");
+type ProjectNameState = {
+  name: string;
+  setName: (name: string) => void;
+};
+
+const ProjectNameContext = createContext<ProjectNameState>({
+  name: "New Project",
+  setName: () => undefined,
+});
 
 export const useProjectName = () => useContext(ProjectNameContext);
 
@@ -47,6 +55,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [credits, setCredits] = useState<number | null>(1000);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const isCreate = pathname === "/create";
+  const isPremiere = pathname === "/demo";
 
   useEffect(() => {
     setMenuOpen(false);
@@ -92,8 +101,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     fetch(`${(process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/$/, "")}/api/wallet`)
       .then((response) => (response.ok ? response.json() : Promise.reject()))
-      .then((data: { credits?: number; balance?: number; credit_balance?: number }) =>
-        setCredits(data.credits ?? data.balance ?? data.credit_balance ?? 1000),
+      .then((data: { remaining?: number; credits?: number; balance?: number; credit_balance?: number; spent?: number }) =>
+        setCredits(
+          data.remaining ??
+            (typeof data.credits === "number" && typeof data.spent === "number"
+              ? Math.max(0, data.credits - data.spent)
+              : data.credits ?? data.balance ?? data.credit_balance ?? 1000),
+        ),
       )
       .catch(() => setCredits(1000));
   }, []);
@@ -103,11 +117,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     "Charismate";
 
   return (
-    <ProjectNameContext.Provider value={projectName}>
+    <ProjectNameContext.Provider value={{ name: projectName, setName: setProjectName }}>
       <div
         className={`app-shell ${theme === "light" ? "theme-light" : "theme-dark"} ${
           sidebarCollapsed ? "sidebar-collapsed" : ""
-        }`}
+        } ${isPremiere ? "premiere-shell" : ""}`}
       >
       <button
         className="mobile-menu-button"
@@ -189,17 +203,21 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               {sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
             </button>
-            {isCreate ? (
+            {isCreate || isPremiere ? (
               <label>
                 <span className="sr-only">Project name</span>
-                <input value={projectName} onChange={(event) => setProjectName(event.target.value)} />
-                <Pencil size={13} aria-hidden="true" />
+                <input
+                  value={isPremiere ? "Pioneer Pitch" : projectName}
+                  onChange={(event) => setProjectName(event.target.value)}
+                  readOnly={isPremiere}
+                />
+                {!isPremiere && <Pencil size={13} aria-hidden="true" />}
               </label>
             ) : (
               <h1>{sectionTitle}</h1>
             )}
           </div>
-          {isCreate && (
+          {(isCreate || isPremiere) && (
             <ol className="stepper" aria-label="Creation progress">
               {["Script & Context", "Record Motion", "Render Video"].map((step, index) => (
                 <li className={index === 0 ? "current" : ""} key={step}>

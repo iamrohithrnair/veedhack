@@ -36,6 +36,41 @@ import { FieldActions } from "@/components/field-actions";
 const DEFAULT_TOPIC = "Why fine-tuning LLMs manually is obsolete with Pioneer AI.";
 const DEFAULT_VIBE = "A dramatic, wise 18th-century philosopher in an oil painting style.";
 
+const SCRIPT_STATUSES = new Set(["researching", "extracting", "writing", "voicing", "scripting"]);
+const RENDER_STATUSES = new Set(["rendering", "uploading"]);
+
+function busyFromStatus(status?: string): "script" | "render" | null {
+  if (!status) return null;
+  if (RENDER_STATUSES.has(status)) return "render";
+  if (SCRIPT_STATUSES.has(status)) return "script";
+  return null;
+}
+
+function scriptFromEvents(events: StreamEvent[]): string {
+  const deltas = events
+    .filter((event) => event.stage === "script_delta")
+    .map((event) => eventValue(event, "delta"))
+    .filter((value): value is string => typeof value === "string");
+  return deltas.join("");
+}
+
+function isAbortError(cause: unknown): boolean {
+  return cause instanceof DOMException
+    ? cause.name === "AbortError"
+    : cause instanceof Error && cause.name === "AbortError";
+}
+
+const PERSONA_PRESETS = [
+  { id: "theatrical", label: "🎭 Theatrical & Unhinged", desc: "Grand classical flair & existential tragedy" },
+  { id: "funny", label: "😂 Funny & Satirical", desc: "Witty comedic timing & sharp hilarious analogies" },
+  { id: "serious", label: "💼 Serious & Authoritative", desc: "Executive briefing, sober data-backed urgency" },
+  { id: "quirky", label: "🧪 Quirky & Eccentric", desc: "Delightfully weird metaphors & nerd enthusiasm" },
+  { id: "cheeky", label: "😏 Cheeky & Provocative", desc: "Playful swagger, calling out industry nonsense" },
+  { id: "deep", label: "🌌 Deep & Philosophical", desc: "Poetic, introspective late-night 3am epiphany" },
+  { id: "hype", label: "⚡ High-Energy Hype", desc: "Relentless creator momentum & electric excitement" },
+  { id: "empathetic", label: "☕ Empathetic & Warm", desc: "Heartfelt, vulnerable mentor coffee chat" },
+];
+
 function eventValue(event: StreamEvent, key: string): unknown {
   if (event[key] !== undefined) return event[key];
   if (event.data && typeof event.data === "object") return (event.data as Record<string, unknown>)[key];
@@ -263,7 +298,7 @@ export function CreateWorkbench() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const reduceMotion = useReducedMotion();
-  const projectName = useProjectName();
+  const { name: projectName, setName: setProjectName } = useProjectName();
   const [topic, setTopic] = useState(DEFAULT_TOPIC);
   const [vibe, setVibe] = useState(DEFAULT_VIBE);
   const [script, setScript] = useState("");
@@ -275,41 +310,52 @@ export function CreateWorkbench() {
   const [error, setError] = useState("");
   const [progress, setProgress] = useState<number | null>(null);
   const [finalVideo, setFinalVideo] = useState("");
-  const [mode, setMode] = useState<"move" | "replace">("move");
+  const [mode, setMode] = useState<"move" | "replace">("replace");
   const [avatars, setAvatars] = useState<ApiRecord[]>([]);
   const [avatarImageUrl, setAvatarImageUrl] = useState("");
   const [recentProjects, setRecentProjects] = useState<ApiRecord[]>([]);
+  const [tone, setTone] = useState("theatrical");
+  const projectIdRef = useRef("");
+  const sseActiveRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    projectIdRef.current = projectId;
+  }, [projectId]);
+
+  const applyProject = useCallback((project: Awaited<ReturnType<typeof getProject>>) => {
+    setProjectId(project.id);
+    localStorage.setItem("charismate_active_project_id", project.id);
+    if (typeof project.name === "string" && project.name.trim()) setProjectName(project.name);
+    if (typeof project.target_prompt === "string") setTopic(project.target_prompt);
+    if (typeof project.avatar_vibe === "string") setVibe(project.avatar_vibe);
+    if (typeof project.tone === "string") setTone(project.tone);
+    const projectEvents = Array.isArray(project.events) ? (project.events as StreamEvent[]) : [];
+    if (projectEvents.length) setEvents(projectEvents);
+    const streamed = scriptFromEvents(projectEvents);
+    if (typeof project.script === "string" && project.script.trim()) setScript(project.script);
+    else if (streamed) setScript(streamed);
+    if (typeof project.audio_url === "string" && project.audio_url) setAudioUrl(project.audio_url);
+    if (typeof project.final_video_url === "string" && project.final_video_url) {
+      setFinalVideo(project.final_video_url);
+    }
+    if (typeof project.avatar_image_url === "string" && project.avatar_image_url) {
+      setAvatarImageUrl(project.avatar_image_url);
+    }
+    setBusy(busyFromStatus(project.status));
+    if (project.status === "completed") setProgress(100);
+    if (project.status === "failed") {
+      setError("Job processing failed. Check live terminal for details.");
+    }
+  }, [setProjectName]);
 
   const loadProjectData = useCallback(async (id: string) => {
     try {
-      const project = await getProject(id);
-      if (!project) return;
-      setProjectId(project.id);
-      localStorage.setItem("charismate_active_project_id", project.id);
-      if (typeof project.target_prompt === "string") setTopic(project.target_prompt);
-      if (typeof project.avatar_vibe === "string") setVibe(project.avatar_vibe);
-      if (typeof project.script === "string") setScript(project.script);
-      if (typeof project.audio_url === "string") setAudioUrl(project.audio_url);
-      if (typeof project.final_video_url === "string") setFinalVideo(project.final_video_url);
-      if (typeof project.avatar_image_url === "string") setAvatarImageUrl(project.avatar_image_url);
-      if (project.events && Array.isArray(project.events)) {
-        setEvents(project.events as StreamEvent[]);
-      }
-      if (project.status === "rendering") {
-        setBusy("render");
-      } else if (
-        project.status === "researching" ||
-        project.status === "extracting" ||
-        project.status === "scripting"
-      ) {
-        setBusy("script");
-      } else {
-        setBusy(null);
-      }
+      applyProject(await getProject(id));
     } catch {
       // ignore
     }
-  }, []);
+  }, [applyProject]);
 
   useEffect(() => {
     getCollection("/api/avatars").then(setAvatars).catch(() => setAvatars([]));
@@ -320,44 +366,52 @@ export function CreateWorkbench() {
     const targetId = paramId || storedId;
     if (targetId) {
       loadProjectData(targetId);
+      return;
     }
+    const avatarParam = searchParams.get("avatar") || searchParams.get("avatar_url");
+    const vibeParam = searchParams.get("vibe");
+    const topicParam = searchParams.get("topic");
+    if (avatarParam) setAvatarImageUrl(avatarParam);
+    if (vibeParam) setVibe(vibeParam);
+    if (topicParam) setTopic(topicParam);
   }, [searchParams, loadProjectData]);
 
-  // Background poller for in-progress tasks so user can navigate away & return anytime
   useEffect(() => {
     if (!projectId || busy === null) return;
     const interval = setInterval(async () => {
       try {
-        const p = await getProject(projectId);
-        if (!p) return;
-        if (p.events && Array.isArray(p.events)) {
-          setEvents(p.events as StreamEvent[]);
+        const project = await getProject(projectId);
+        if (!project || projectIdRef.current !== projectId) return;
+        if (!sseActiveRef.current) {
+          applyProject(project);
+        } else if (
+          project.status === "script_ready" ||
+          project.status === "completed" ||
+          project.status === "failed"
+        ) {
+          applyProject(project);
         }
-        if (typeof p.script === "string") setScript(p.script);
-        if (typeof p.audio_url === "string") setAudioUrl(p.audio_url);
-        if (typeof p.final_video_url === "string") {
-          setFinalVideo(p.final_video_url);
-        }
-        if (p.status === "completed") {
-          setBusy(null);
-          setProgress(100);
+        if (project.status === "completed" || project.status === "script_ready") {
           getCollection("/api/projects").then(setRecentProjects).catch(() => undefined);
-        } else if (p.status === "failed") {
-          setBusy(null);
-          setError("Job processing failed. Check live terminal for details.");
         }
       } catch {
         // ignore
       }
     }, 2500);
     return () => clearInterval(interval);
-  }, [projectId, busy]);
+  }, [projectId, busy, applyProject]);
 
   const handleNewProject = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    sseActiveRef.current = false;
     setProjectId("");
+    projectIdRef.current = "";
     localStorage.removeItem("charismate_active_project_id");
+    setProjectName("New Project");
     setTopic(DEFAULT_TOPIC);
     setVibe(DEFAULT_VIBE);
+    setTone("theatrical");
     setScript("");
     setAudioUrl("");
     setFinalVideo("");
@@ -366,6 +420,7 @@ export function CreateWorkbench() {
     setProgress(null);
     setError("");
     setRecording(null);
+    setAvatarImageUrl("");
     router.replace("/create");
   };
 
@@ -377,7 +432,8 @@ export function CreateWorkbench() {
     return () => window.clearTimeout(timer);
   }, [projectId, projectName]);
 
-  const appendEvent = (event: StreamEvent) => {
+  const appendEvent = (event: StreamEvent, forProjectId: string) => {
+    if (projectIdRef.current !== forProjectId) return;
     setEvents((current) => [...current, event]);
     const nextScript = eventValue(event, "script");
     const scriptDelta = eventValue(event, "delta");
@@ -390,7 +446,7 @@ export function CreateWorkbench() {
     if (typeof nextVideo === "string") setFinalVideo(nextVideo);
     if (typeof nextProgress === "number") setProgress(Math.max(0, Math.min(100, nextProgress)));
     if (event.level === "error" || event.stage === "error") {
-      throw new Error(event.message || "The pipeline failed. Check the live terminal for details.");
+      setError(event.message || "The pipeline failed. Check the live terminal for details.");
     }
   };
 
@@ -402,12 +458,16 @@ export function CreateWorkbench() {
       avatar_vibe: vibe,
     });
     setProjectId(project.id);
+    projectIdRef.current = project.id;
     localStorage.setItem("charismate_active_project_id", project.id);
     getCollection("/api/projects").then(setRecentProjects).catch(() => undefined);
     return project.id;
   };
 
   const handleGenerate = async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setBusy("script");
     setError("");
     setEvents([]);
@@ -416,11 +476,22 @@ export function CreateWorkbench() {
     setFinalVideo("");
     try {
       const id = await ensureProject();
-      await generateScript({ project_id: id, topic, avatar_vibe: vibe }, appendEvent);
+      projectIdRef.current = id;
+      sseActiveRef.current = true;
+      await generateScript(
+        { project_id: id, topic, avatar_vibe: vibe, tone },
+        (event) => appendEvent(event, id),
+        controller.signal,
+      );
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Script generation failed.");
+      if (!isAbortError(cause)) {
+        setError(cause instanceof Error ? cause.message : "Script generation failed.");
+      }
     } finally {
-      setBusy(null);
+      sseActiveRef.current = false;
+      if (projectIdRef.current) {
+        await loadProjectData(projectIdRef.current);
+      }
     }
   };
 
@@ -429,12 +500,16 @@ export function CreateWorkbench() {
       setError("Generate a script with audio and record ten seconds of driving motion first.");
       return;
     }
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setBusy("render");
     setError("");
     setProgress(null);
     setFinalVideo("");
     try {
       const id = await ensureProject();
+      projectIdRef.current = id;
       const form = new FormData();
       form.append("project_id", id);
       form.append("avatar_vibe", vibe);
@@ -442,11 +517,17 @@ export function CreateWorkbench() {
       form.append("mode", mode);
       if (avatarImageUrl) form.append("avatar_image_url", avatarImageUrl);
       form.append("driving_video", recording, "motion.webm");
-      await renderVideo(form, appendEvent);
+      sseActiveRef.current = true;
+      await renderVideo(form, (event) => appendEvent(event, id), controller.signal);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Video render failed.");
+      if (!isAbortError(cause)) {
+        setError(cause instanceof Error ? cause.message : "Video render failed.");
+      }
     } finally {
-      setBusy(null);
+      sseActiveRef.current = false;
+      if (projectIdRef.current) {
+        await loadProjectData(projectIdRef.current);
+      }
     }
   };
 
@@ -483,7 +564,7 @@ export function CreateWorkbench() {
                 <option value="">Current Draft</option>
                 {recentProjects.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.status === "completed" ? "✓ " : p.status === "rendering" ? "⏳ " : "• "}
+                    {p.status === "completed" ? "✓ " : busyFromStatus(String(p.status || "")) ? "⏳ " : p.status === "script_ready" ? "▸ " : "• "}
                     {String(p.name || p.id).slice(0, 24)}
                   </option>
                 ))}
@@ -498,6 +579,22 @@ export function CreateWorkbench() {
           </div>
           <textarea maxLength={250} value={topic} onChange={(event) => setTopic(event.target.value)} />
           <small>{topic.length} / 250</small>
+        </div>
+        <div className="field">
+          <div className="field-header">
+            <span>2. Persona & Script Tone <i>Customize tone of voice</i></span>
+          </div>
+          <select
+            className="persona-tone-select"
+            value={tone}
+            onChange={(e) => setTone(e.target.value)}
+          >
+            {PERSONA_PRESETS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label} — {p.desc}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="generation-options">
           <div>
@@ -519,7 +616,7 @@ export function CreateWorkbench() {
         </div>
         <div className="field">
           <div className="field-header">
-            <span>2. Avatar vibe <i>Describe your character</i></span>
+            <span>3. Avatar vibe <i>Describe your character</i></span>
             <FieldActions value={vibe} onChange={setVibe} />
           </div>
           <textarea maxLength={250} value={vibe} onChange={(event) => setVibe(event.target.value)} />

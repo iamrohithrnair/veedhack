@@ -171,4 +171,7 @@ async def get_wallet() -> dict:
     wallet = await db.get_row("wallet", 1)
     if wallet is None:
         raise HTTPException(500, "Wallet was not initialized")
+    credits = float(wallet.get("credits") or 0)
+    spent = float(wallet.get("spent") or 0)
+    wallet["remaining"] = max(0.0, credits - spent)
     return wallet

@@ -41,6 +41,7 @@ class TemplateCreate(BaseModel):
 class ScriptRequest(BaseModel):
     target_prompt: str = Field(min_length=3, max_length=5000)
     avatar_vibe: str | None = Field(default=None, max_length=500)
+    tone: str | None = Field(default="theatrical", max_length=100)
     project_id: str | None = None
 
 

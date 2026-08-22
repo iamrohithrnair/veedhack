@@ -19,6 +19,7 @@ from sse_starlette.sse import EventSourceResponse
 from app import db
 from app.artifacts import copy_file, save_url, write_json
 from app.config import get_settings
+from app.jobs import spawn
 from app.sse import emit, emit_error, make_event
 
 router = APIRouter(prefix="/api")
@@ -355,7 +356,7 @@ async def _render_stream(
         raise ValueError("driving_video is empty")
 
     queue: asyncio.Queue[dict[str, str] | None] = asyncio.Queue()
-    asyncio.create_task(
+    spawn(
         _execute_render_pipeline(
             project_id=project_id,
             avatar_vibe=avatar_vibe,

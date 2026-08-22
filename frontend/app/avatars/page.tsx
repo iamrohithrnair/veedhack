@@ -238,7 +238,7 @@ export default function AvatarsPage() {
                   <div className="avatar-card-actions">
                     <Link
                       className="avatar-use-btn"
-                      href="/create"
+                      href={`/create?avatar=${encodeURIComponent(imgUrl)}${avatar.vibe ? `&vibe=${encodeURIComponent(String(avatar.vibe))}` : ""}`}
                       title="Use this avatar in a video project"
                     >
                       <Video size={13} />

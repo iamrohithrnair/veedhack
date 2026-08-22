@@ -16,6 +16,12 @@ data: {"stage":"tavily","level":"info","message":"Extracting industry context...
 `payload: {"delta": "..."}`. A terminal `done` event contains the completed
 resource URLs.
 
+Both pipelines keep running after the client disconnects. Events are persisted
+on the project. Poll `GET /api/projects/{id}` for `status` and `events`.
+
+Project `status` values: `draft`, `researching`, `extracting`, `writing`,
+`voicing`, `script_ready`, `rendering`, `completed`, `failed`.
+
 ## `POST /api/generate-script`
 
 JSON body:
@@ -55,3 +61,5 @@ The final event payload contains `avatar_image_url`,
 - `DELETE /api/templates/{id}`
 - `GET /api/dashboard/stats`
 - `GET /api/wallet`
+- `GET /api/showcase` — latest saved studio run (script, entities, media paths)
+- `GET /api/showcase/files/{name}` — `audio.mp3`, `avatar.png`, `driving.mp4`, `intermediate.mp4`, `final.mp4`
