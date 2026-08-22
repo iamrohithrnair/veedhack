@@ -142,47 +142,45 @@ async def _transcode(source: Path, destination: Path) -> Path:
     return destination
 
 
-async def _render_stream(
+async def _execute_render_pipeline(
     *,
     project_id: str,
     avatar_vibe: str,
     audio_url: str,
     mode: Literal["move", "replace"],
     avatar_image_url: str | None,
-    driving_video: UploadFile,
-) -> AsyncIterator[dict[str, str]]:
+    source_path: Path,
+    queue: asyncio.Queue[dict[str, str] | None] | None = None,
+) -> None:
     settings = get_settings()
-    temp_dir = Path(tempfile.mkdtemp(prefix="charismate-render-"))
-    source = temp_dir / (Path(driving_video.filename or "driving-video").name)
+    temp_dir = source_path.parent
     transcoded = temp_dir / "driving-video.mp4"
     started = time.monotonic()
     reported_cost = 0.0
+
+    async def send_event(event: dict[str, str]) -> None:
+        if queue is not None:
+            await queue.put(event)
+
     try:
         if not _valid_url(audio_url):
             raise ValueError("audio_url must be a public HTTP(S) URL")
         fal_key = settings.require("fal_key")
         os.environ["FAL_KEY"] = fal_key
         await db.update_project(project_id, {"status": "rendering", "avatar_vibe": avatar_vibe})
-        yield await emit(project_id, make_event("upload", "info", "Preparing driving video"))
+        await send_event(await emit(project_id, make_event("upload", "info", "Preparing driving video")))
 
-        total = 0
-        with source.open("wb") as output:
-            while chunk := await driving_video.read(1024 * 1024):
-                total += len(chunk)
-                if total > 250 * 1024 * 1024:
-                    raise ValueError("driving_video exceeds the 250 MB limit")
-                output.write(chunk)
-        if total == 0:
-            raise ValueError("driving_video is empty")
-        upload_path = await _transcode(source, transcoded)
+        upload_path = await _transcode(source_path, transcoded)
         copy_file(project_id, "driving.mp4", upload_path)
         driving_url = await fal_client.upload_file_async(str(upload_path))
         if not _valid_url(driving_url):
             raise RuntimeError("fal upload did not return a valid driving video URL")
         await db.update_project(project_id, {"driving_video_url": driving_url})
-        yield await emit(
-            project_id,
-            make_event("upload", "success", "Driving video uploaded", {"driving_video_url": driving_url}),
+        await send_event(
+            await emit(
+                project_id,
+                make_event("upload", "success", "Driving video uploaded", {"driving_video_url": driving_url}),
+            )
         )
 
         image_url = avatar_image_url
@@ -190,7 +188,7 @@ async def _render_stream(
         if image_url is not None and not _valid_url(image_url):
             raise ValueError("avatar_image_url must be a public HTTP(S) URL")
         if image_url is None:
-            yield await emit(project_id, make_event("avatar", "info", "Generating avatar image"))
+            await send_event(await emit(project_id, make_event("avatar", "info", "Generating avatar image")))
             image_result: Any = None
             async for kind, value in _fal_updates(
                 settings.fal_image_model,
@@ -204,7 +202,7 @@ async def _render_stream(
                 settings.pipeline_timeout_seconds,
             ):
                 if kind == "progress":
-                    yield await emit(project_id, make_event("avatar", "info", "Avatar generation progress", value))
+                    await send_event(await emit(project_id, make_event("avatar", "info", "Avatar generation progress", value)))
                 elif kind == "error":
                     raise value
                 else:
@@ -225,10 +223,10 @@ async def _render_stream(
             )
         await save_url(project_id, "avatar.png", image_url)
         await db.update_project(project_id, {"avatar_image_url": image_url})
-        yield await emit(project_id, make_event("avatar", "success", "Avatar ready", {"avatar_image_url": image_url}))
+        await send_event(await emit(project_id, make_event("avatar", "success", "Avatar ready", {"avatar_image_url": image_url})))
 
         animate_model = f"{settings.fal_animate_model}/{mode}"
-        yield await emit(project_id, make_event("animate", "info", "Animating avatar"))
+        await send_event(await emit(project_id, make_event("animate", "info", "Animating avatar with Wan-Animate")))
         animation_result: Any = None
         async for kind, value in _fal_updates(
             animate_model,
@@ -242,7 +240,7 @@ async def _render_stream(
             settings.pipeline_timeout_seconds,
         ):
             if kind == "progress":
-                yield await emit(project_id, make_event("animate", "info", "Animation progress", value))
+                await send_event(await emit(project_id, make_event("animate", "info", "Animation progress", value)))
             elif kind == "error":
                 raise value
             else:
@@ -253,9 +251,9 @@ async def _render_stream(
         reported_cost += _reported_cost(animation_result)
         await save_url(project_id, "intermediate.mp4", video_url)
         await db.update_project(project_id, {"video_url": video_url})
-        yield await emit(project_id, make_event("animate", "success", "Animation complete", {"video_url": video_url}))
+        await send_event(await emit(project_id, make_event("animate", "success", "Animation complete", {"video_url": video_url})))
 
-        yield await emit(project_id, make_event("lipsync", "info", "Synchronizing speech"))
+        await send_event(await emit(project_id, make_event("lipsync", "info", "Synchronizing speech with VEED Lipsync v2")))
         lipsync_result: Any = None
         async for kind, value in _fal_updates(
             settings.fal_lipsync_model,
@@ -263,7 +261,7 @@ async def _render_stream(
             settings.pipeline_timeout_seconds,
         ):
             if kind == "progress":
-                yield await emit(project_id, make_event("lipsync", "info", "Lip-sync progress", value))
+                await send_event(await emit(project_id, make_event("lipsync", "info", "Lip-sync progress", value)))
             elif kind == "error":
                 raise value
             else:
@@ -305,30 +303,75 @@ async def _render_stream(
                 "provider_reported_cost": reported_cost,
             },
         )
-        yield await emit(
-            project_id,
-            make_event(
-                "done",
-                "success",
-                "Video render complete",
-                {
-                    "project_id": project_id,
-                    "avatar_image_url": image_url,
-                    "intermediate_video_url": video_url,
-                    "final_video_url": final_url,
-                    "duration_seconds": duration,
-                },
-            ),
+        await send_event(
+            await emit(
+                project_id,
+                make_event(
+                    "done",
+                    "success",
+                    "Video render complete",
+                    {
+                        "project_id": project_id,
+                        "avatar_image_url": image_url,
+                        "intermediate_video_url": video_url,
+                        "final_video_url": final_url,
+                        "duration_seconds": duration,
+                    },
+                ),
+            )
         )
     except Exception as error:
         await db.update_project(
             project_id,
             {"status": "failed", "render_duration_seconds": time.monotonic() - started},
         )
-        yield await emit_error(project_id, "error", error)
+        await send_event(await emit_error(project_id, "error", error))
     finally:
-        await driving_video.close()
         shutil.rmtree(temp_dir, ignore_errors=True)
+        if queue is not None:
+            await queue.put(None)
+
+
+async def _render_stream(
+    *,
+    project_id: str,
+    avatar_vibe: str,
+    audio_url: str,
+    mode: Literal["move", "replace"],
+    avatar_image_url: str | None,
+    driving_video: UploadFile,
+) -> AsyncIterator[dict[str, str]]:
+    temp_dir = Path(tempfile.mkdtemp(prefix="charismate-render-"))
+    source = temp_dir / (Path(driving_video.filename or "driving-video").name)
+    total = 0
+    with source.open("wb") as output:
+        while chunk := await driving_video.read(1024 * 1024):
+            total += len(chunk)
+            if total > 250 * 1024 * 1024:
+                raise ValueError("driving_video exceeds the 250 MB limit")
+            output.write(chunk)
+    await driving_video.close()
+    if total == 0:
+        raise ValueError("driving_video is empty")
+
+    queue: asyncio.Queue[dict[str, str] | None] = asyncio.Queue()
+    asyncio.create_task(
+        _execute_render_pipeline(
+            project_id=project_id,
+            avatar_vibe=avatar_vibe,
+            audio_url=audio_url,
+            mode=mode,
+            avatar_image_url=avatar_image_url,
+            source_path=source,
+            queue=queue,
+        )
+    )
+
+    while True:
+        event = await queue.get()
+        if event is None:
+            break
+        yield event
 
 
 @router.post("/render-video")

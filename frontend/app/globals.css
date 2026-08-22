@@ -233,8 +233,23 @@ a { color: inherit; text-decoration: none; }
 }
 .script-panel, .motion-panel { padding: 15px; }
 .panel-heading { height: 31px; border-bottom: 1px solid var(--line); margin: -3px -15px 14px; padding: 0 15px 11px; display: flex; align-items: center; gap: 9px; }
-.panel-heading > span { padding: 3px 7px; border-radius: 4px; color: var(--purple); background: rgba(112, 72, 255, 0.12); text-transform: uppercase; font-size: 8.5px; font-weight: 700; }
-.panel-heading h2 { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--text); }
+.panel-heading > span, .panel-heading-title > span { padding: 3px 7px; border-radius: 4px; color: var(--purple); background: rgba(112, 72, 255, 0.12); text-transform: uppercase; font-size: 8.5px; font-weight: 700; }
+.panel-heading h2, .panel-heading-title h2 { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--text); }
+.workbench-panel-heading { justify-content: space-between; }
+.panel-heading-title { display: flex; align-items: center; gap: 9px; }
+.workbench-job-controls { display: inline-flex; align-items: center; gap: 6px; }
+.new-job-btn {
+  height: 24px; padding: 0 8px; border: 1px solid var(--purple); border-radius: 6px;
+  background: rgba(112, 72, 255, 0.1); color: var(--purple); font-size: 10px; font-weight: 600;
+  display: inline-flex; align-items: center; gap: 3px; transition: all 0.15s ease;
+}
+.new-job-btn:hover { background: var(--purple); color: white; transform: translateY(-1px); }
+.job-selector {
+  height: 24px; padding: 0 6px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel-2); color: var(--text); font-size: 9.5px; font-weight: 500;
+  max-width: 140px; outline: none; transition: border-color 0.15s ease;
+}
+.job-selector:focus { border-color: var(--purple); }
 .field { position: relative; display: block; margin-bottom: 12px; }
 .field > span { display: block; margin-bottom: 6px; color: var(--text); font-size: 10.5px; font-weight: 600; }
 .field > span i { color: var(--muted); font-style: normal; font-weight: 400; }

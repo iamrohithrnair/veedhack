@@ -11,6 +11,7 @@ import {
   Download,
   LoaderCircle,
   Play,
+  Plus,
   RefreshCcw,
   Send,
   Sparkles,
@@ -18,8 +19,16 @@ import {
   Video,
   WandSparkles,
 } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createProject, generateScript, getCollection, renderVideo, updateProject } from "@/lib/api";
+import {
+  createProject,
+  generateScript,
+  getCollection,
+  getProject,
+  renderVideo,
+  updateProject,
+} from "@/lib/api";
 import type { ApiRecord, StreamEvent } from "@/lib/types";
 import { useProjectName } from "@/components/app-shell";
 import { FieldActions } from "@/components/field-actions";
@@ -251,6 +260,8 @@ function CameraRecorder({ onRecording }: { onRecording: (blob: Blob | null) => v
 }
 
 export function CreateWorkbench() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const reduceMotion = useReducedMotion();
   const projectName = useProjectName();
   const [topic, setTopic] = useState(DEFAULT_TOPIC);
@@ -267,10 +278,96 @@ export function CreateWorkbench() {
   const [mode, setMode] = useState<"move" | "replace">("move");
   const [avatars, setAvatars] = useState<ApiRecord[]>([]);
   const [avatarImageUrl, setAvatarImageUrl] = useState("");
+  const [recentProjects, setRecentProjects] = useState<ApiRecord[]>([]);
+
+  const loadProjectData = useCallback(async (id: string) => {
+    try {
+      const project = await getProject(id);
+      if (!project) return;
+      setProjectId(project.id);
+      localStorage.setItem("charismate_active_project_id", project.id);
+      if (typeof project.target_prompt === "string") setTopic(project.target_prompt);
+      if (typeof project.avatar_vibe === "string") setVibe(project.avatar_vibe);
+      if (typeof project.script === "string") setScript(project.script);
+      if (typeof project.audio_url === "string") setAudioUrl(project.audio_url);
+      if (typeof project.final_video_url === "string") setFinalVideo(project.final_video_url);
+      if (typeof project.avatar_image_url === "string") setAvatarImageUrl(project.avatar_image_url);
+      if (project.events && Array.isArray(project.events)) {
+        setEvents(project.events as StreamEvent[]);
+      }
+      if (project.status === "rendering") {
+        setBusy("render");
+      } else if (
+        project.status === "researching" ||
+        project.status === "extracting" ||
+        project.status === "scripting"
+      ) {
+        setBusy("script");
+      } else {
+        setBusy(null);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
   useEffect(() => {
     getCollection("/api/avatars").then(setAvatars).catch(() => setAvatars([]));
-  }, []);
+    getCollection("/api/projects").then(setRecentProjects).catch(() => setRecentProjects([]));
+
+    const paramId = searchParams.get("project_id");
+    const storedId = localStorage.getItem("charismate_active_project_id");
+    const targetId = paramId || storedId;
+    if (targetId) {
+      loadProjectData(targetId);
+    }
+  }, [searchParams, loadProjectData]);
+
+  // Background poller for in-progress tasks so user can navigate away & return anytime
+  useEffect(() => {
+    if (!projectId || busy === null) return;
+    const interval = setInterval(async () => {
+      try {
+        const p = await getProject(projectId);
+        if (!p) return;
+        if (p.events && Array.isArray(p.events)) {
+          setEvents(p.events as StreamEvent[]);
+        }
+        if (typeof p.script === "string") setScript(p.script);
+        if (typeof p.audio_url === "string") setAudioUrl(p.audio_url);
+        if (typeof p.final_video_url === "string") {
+          setFinalVideo(p.final_video_url);
+        }
+        if (p.status === "completed") {
+          setBusy(null);
+          setProgress(100);
+          getCollection("/api/projects").then(setRecentProjects).catch(() => undefined);
+        } else if (p.status === "failed") {
+          setBusy(null);
+          setError("Job processing failed. Check live terminal for details.");
+        }
+      } catch {
+        // ignore
+      }
+    }, 2500);
+    return () => clearInterval(interval);
+  }, [projectId, busy]);
+
+  const handleNewProject = () => {
+    setProjectId("");
+    localStorage.removeItem("charismate_active_project_id");
+    setTopic(DEFAULT_TOPIC);
+    setVibe(DEFAULT_VIBE);
+    setScript("");
+    setAudioUrl("");
+    setFinalVideo("");
+    setEvents([]);
+    setBusy(null);
+    setProgress(null);
+    setError("");
+    setRecording(null);
+    router.replace("/create");
+  };
 
   useEffect(() => {
     if (!projectId || !projectName.trim()) return;
@@ -305,6 +402,8 @@ export function CreateWorkbench() {
       avatar_vibe: vibe,
     });
     setProjectId(project.id);
+    localStorage.setItem("charismate_active_project_id", project.id);
+    getCollection("/api/projects").then(setRecentProjects).catch(() => undefined);
     return project.id;
   };
 
@@ -354,7 +453,44 @@ export function CreateWorkbench() {
   return (
     <section className="workbench">
       <div className="work-panel script-panel">
-        <div className="panel-heading"><span>Step 1</span><h2>Generate script & context</h2></div>
+        <div className="panel-heading workbench-panel-heading">
+          <div className="panel-heading-title">
+            <span>Step 1</span>
+            <h2>Generate script & context</h2>
+          </div>
+          <div className="workbench-job-controls">
+            <button
+              className="new-job-btn"
+              onClick={handleNewProject}
+              type="button"
+              title="Start a new video project without waiting"
+            >
+              <Plus size={13} /> New Job
+            </button>
+            {recentProjects.length > 0 && (
+              <select
+                className="job-selector"
+                value={projectId}
+                onChange={(e) => {
+                  if (e.target.value) {
+                    loadProjectData(e.target.value);
+                  } else {
+                    handleNewProject();
+                  }
+                }}
+                title="Switch between past or in-progress jobs"
+              >
+                <option value="">Current Draft</option>
+                {recentProjects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.status === "completed" ? "✓ " : p.status === "rendering" ? "⏳ " : "• "}
+                    {String(p.name || p.id).slice(0, 24)}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+        </div>
         <div className="field">
           <div className="field-header">
             <span>1. What&apos;s your video about?</span>

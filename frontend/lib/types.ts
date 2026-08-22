@@ -17,6 +17,10 @@ export type Project = ApiRecord & {
   target_prompt?: string;
   avatar_vibe?: string;
   script?: string;
+  audio_url?: string;
+  avatar_image_url?: string;
+  driving_video_url?: string;
+  video_url?: string;
   final_video_url?: string;
   extracted?: Record<string, unknown>;
   events?: StreamEvent[];
