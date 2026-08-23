@@ -323,6 +323,8 @@ export function CreateWorkbench() {
     projectIdRef.current = projectId;
   }, [projectId]);
 
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   const applyProject = useCallback((project: Awaited<ReturnType<typeof getProject>>) => {
     setProjectId(project.id);
     localStorage.setItem("charismate_active_project_id", project.id);

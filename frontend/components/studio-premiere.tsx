@@ -53,7 +53,7 @@ function eventLabel(event: StreamEvent) {
   return event.message || event.stage || "event";
 }
 
-function presentEntities(raw: Record<string, string> | undefined): Record<string, string> {
+function presentEntities(raw: Record<string, string> | undefined) {
   const subject = raw?.Core_Subject || "";
   if (!subject || subject.split(",").length > 2) return FALLBACK_ENTITIES;
   return {
